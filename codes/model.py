@@ -17,16 +17,22 @@ from sklearn.metrics import average_precision_score
 from torch.utils.data import DataLoader
 
 from dataloader import TestDataset
+from ga import GA
+
 
 class KGEModel(nn.Module):
-    def __init__(self, model_name, nentity, nrelation, hidden_dim, gamma, 
+    def __init__(self, model_name, nentity, nrelation, hidden_dim, gamma, vec_space,
                  double_entity_embedding=False, double_relation_embedding=False):
         super(KGEModel, self).__init__()
+        # q = GA.tensor_to_mv(torch.tensor([[4, 3, 2, 1],[1,2,3,4]]))
+        # print(q)
+        # exit(0)
         self.model_name = model_name
         self.nentity = nentity
         self.nrelation = nrelation
         self.hidden_dim = hidden_dim
         self.epsilon = 2.0
+        self.vec_space = vec_space
         
         self.gamma = nn.Parameter(
             torch.Tensor([gamma]), 
@@ -37,17 +43,18 @@ class KGEModel(nn.Module):
             torch.Tensor([(self.gamma.item() + self.epsilon) / hidden_dim]), 
             requires_grad=False
         )
-        
+            
         self.entity_dim = hidden_dim*2 if double_entity_embedding else hidden_dim
         self.relation_dim = hidden_dim*2 if double_relation_embedding else hidden_dim
-        
+        if vec_space == 'clifford':
+            self.entity_dim = 4
+            self.relation_dim = 1
         self.entity_embedding = nn.Parameter(torch.zeros(nentity, self.entity_dim))
         nn.init.uniform_(
             tensor=self.entity_embedding, 
             a=-self.embedding_range.item(), 
             b=self.embedding_range.item()
         )
-        
         self.relation_embedding = nn.Parameter(torch.zeros(nrelation, self.relation_dim))
         nn.init.uniform_(
             tensor=self.relation_embedding, 
@@ -80,69 +87,101 @@ class KGEModel(nn.Module):
         '''
 
         if mode == 'single':
+            # print('----------------single----------------')
             batch_size, negative_sample_size = sample.size(0), 1
-            
-            head = torch.index_select(
-                self.entity_embedding, 
-                dim=0, 
-                index=sample[:,0]
-            ).unsqueeze(1)
-            
-            relation = torch.index_select(
-                self.relation_embedding, 
-                dim=0, 
-                index=sample[:,1]
-            ).unsqueeze(1)
-            
-            tail = torch.index_select(
-                self.entity_embedding, 
-                dim=0, 
-                index=sample[:,2]
-            ).unsqueeze(1)
+            if self.vec_space == 'clifford':
+                head = [self.entity_embedding[i] for i in sample[:,0]]
+                relation = [self.relation_embedding[i] for i in sample[:,1]]
+                tail = [self.entity_embedding[i] for i in sample[:,2]]
+            else:
+                head = torch.index_select(
+                    self.entity_embedding, 
+                    dim=0, 
+                    index=sample[:,0]
+                ).unsqueeze(1)
+                
+                relation = torch.index_select(
+                    self.relation_embedding, 
+                    dim=0, 
+                    index=sample[:,1]
+                ).unsqueeze(1)
+                
+                tail = torch.index_select(
+                    self.entity_embedding, 
+                    dim=0, 
+                    index=sample[:,2]
+                ).unsqueeze(1)
             
         elif mode == 'head-batch':
+            # print('----------------head-batch----------------')
             tail_part, head_part = sample
             batch_size, negative_sample_size = head_part.size(0), head_part.size(1)
-            
-            head = torch.index_select(
-                self.entity_embedding, 
-                dim=0, 
-                index=head_part.view(-1)
-            ).view(batch_size, negative_sample_size, -1)
-            
-            relation = torch.index_select(
-                self.relation_embedding, 
-                dim=0, 
-                index=tail_part[:, 1]
-            ).unsqueeze(1)
-            
-            tail = torch.index_select(
-                self.entity_embedding, 
-                dim=0, 
-                index=tail_part[:, 2]
-            ).unsqueeze(1)
+            # print('head-batch')
+            # print('pos', tail_part)
+            # print('neg', head_part)
+            # exit(0)
+            if self.vec_space == 'clifford':
+                head = []
+                relation = [self.relation_embedding[i] for i in tail_part[:,1]]
+                tail = [self.entity_embedding[i] for i in tail_part[:,2]]
+                for i in range(len(head_part)):
+                    head.append([self.entity_embedding[j] for j in head_part[i,:]])
+            else:
+                head = torch.index_select(
+                    self.entity_embedding, 
+                    dim=0, 
+                    index=head_part.view(-1)
+                ).view(batch_size, negative_sample_size, -1)
+                
+                relation = torch.index_select(
+                    self.relation_embedding, 
+                    dim=0, 
+                    index=tail_part[:, 1]
+                ).unsqueeze(1)
+                
+                tail = torch.index_select(
+                    self.entity_embedding, 
+                    dim=0, 
+                    index=tail_part[:, 2]
+                ).unsqueeze(1)
             
         elif mode == 'tail-batch':
+            # print('----------------tail-batch----------------')
             head_part, tail_part = sample
             batch_size, negative_sample_size = tail_part.size(0), tail_part.size(1)
-            
-            head = torch.index_select(
-                self.entity_embedding, 
-                dim=0, 
-                index=head_part[:, 0]
-            ).unsqueeze(1)
-            
-            relation = torch.index_select(
-                self.relation_embedding,
-                dim=0,
-                index=head_part[:, 1]
-            ).unsqueeze(1)
-            
-            tail = torch.index_select(
-                self.entity_embedding, 
-                dim=0, 
-                index=tail_part.view(-1)
-            ).view(batch_size, negative_sample_size, -1)
+            # print('tail-batch')
+            # print('pos', head_part)
+            # print('neg', tail_part)
+            if self.vec_space == 'clifford':
+                head = [self.entity_embedding[i] for i in head_part[:,0]]
+                relation = [self.relation_embedding[i] for i in head_part[:,1]]
+                tail = []
+                # for i in head_part[:,0]:
+                #     head.append(self.entity_embedding[i])
+                # for i in head_part[:,1]:
+                #     relation.append(self.relation_embedding[i])
+                for i in range(len(tail_part)):
+                    tail.append([self.entity_embedding[j] for j in tail_part[i,:]])
+                # exit(0)
+            else:
+                
+                head = torch.index_select(
+                    self.entity_embedding, 
+                    dim=0, 
+                    index=head_part[:, 0]
+                ).unsqueeze(1)
+                
+                relation = torch.index_select(
+                    self.relation_embedding,
+                    dim=0,
+                    index=head_part[:, 1]
+                ).unsqueeze(1)
+                
+                tail = torch.index_select(
+                    self.entity_embedding, 
+                    dim=0, 
+                    index=tail_part.view(-1)
+                ).view(batch_size, negative_sample_size, -1)
             
         else:
             raise ValueError('mode %s not supported' % mode)
@@ -199,33 +238,84 @@ class KGEModel(nn.Module):
 
     def RotatE(self, head, relation, tail, mode):
         pi = 3.14159265358979323846
-        
-        re_head, im_head = torch.chunk(head, 2, dim=2)
-        re_tail, im_tail = torch.chunk(tail, 2, dim=2)
 
-        #Make phases of relations uniformly distributed in [-pi, pi]
+        if self.vec_space == 'clifford':
+            score = []
+            phase_relation = [rela_i/(self.embedding_range.item()/pi) for rela_i in relation]
+            w = [GA.tensor_to_mv(torch.tensor([np.cos(phase_i.item()), 0, 0, -np.sin(phase_i.item())])) for phase_i in phase_relation]
+            w_hat = [GA.tensor_to_mv(torch.tensor([np.cos(phase_i.item()), 0, 0, np.sin(phase_i.item())])) for phase_i in phase_relation]
+            # print('----r_head ccccc', [GA.mv_to_tensor(tail_i) for tail_i in w])
+            if mode == 'head-batch':
+                tail_cl = [GA.tensor_to_mv(tail_i) for tail_i in tail]
+                # print('len head', len(head))
+                for (head_i, tail_cl_i) in zip(head, tail_cl):
+                    head_i_cl = [GA.tensor_to_mv(head_j) for head_j in head_i]
+                    r_head = [w_i*head_i_cl_j for (w_i,head_i_cl_j) in zip(w, head_i_cl)]
+                    r_head = [r_head_i*w_hat_i for (r_head_i,w_hat_i) in zip(r_head, w_hat)]
+                    score_cl = [r_head_i-tail_cl_i for (r_head_i,tail_cl_i) in zip(r_head, tail_cl)]
+                    score = [score_cl_i[1]+score_cl_i[2]+score_cl_i[3] for score_cl_i in score_cl]
+                    # print('len score_cl', len(score_cl))
+            elif mode == 'tail-batch':
+                head_cl = [GA.tensor_to_mv(head_i) for head_i in head]
+                r_head = [w_i*head_cl_i for (w_i,head_cl_i) in zip(w, head_cl)]
+                r_head = [head_cl_i*w_hat_i for (head_cl_i,w_hat_i) in zip(r_head, w_hat)]
+                for (head_cl_i,tail_i) in zip(r_head, tail):
+                    score_stack = torch.tensor([0., 0., 0.])
+                    for j in range(len(tail_i)):
+                        score_cl = head_cl_i - GA.tensor_to_mv(tail_i[j])
+                        score_tensor = GA.mv_to_tensor(score_cl)
+                        score_stack += torch.stack((score_tensor[1], score_tensor[2], score_tensor[3]))
+                    # print('score_stack',score_stack)
+                    score.append(score_stack)
+            else:
+                head_cl = [GA.tensor_to_mv(head_i) for head_i in head]
+                r_head = [w_i*head_cl_i for (w_i,head_cl_i) in zip(w, head_cl)]
+                r_head = [head_cl_i*w_hat_i for (head_cl_i,w_hat_i) in zip(r_head, w_hat)]
+                tail_cl = [GA.tensor_to_mv(tail_i) for tail_i in tail]
+                score_cl = [head_cl_i-tail_cl_i for (head_cl_i,tail_cl_i) in zip(r_head, tail_cl)]
+                score = [score_cl_i[1]+score_cl_i[2]+score_cl_i[3] for score_cl_i in score_cl]
+                # score_s = torch.stack(score_tensor)
+                # score = GA.mv_to_tensor(score_cl)
+                # print('cc', head)
+                # print('cc', w)
+                # print('cc', w_hat)
+                # print('score_stack', score_stack)
+            score = torch.vstack(score)
+            # print('score', score)
+            # score = score.sum(dim = 1)
+            # print('score', score)
 
-        phase_relation = relation/(self.embedding_range.item()/pi)
-
-        re_relation = torch.cos(phase_relation)
-        im_relation = torch.sin(phase_relation)
-
-        if mode == 'head-batch':
-            re_score = re_relation * re_tail + im_relation * im_tail
-            im_score = re_relation * im_tail - im_relation * re_tail
-            re_score = re_score - re_head
-            im_score = im_score - im_head
+            score = self.gamma.item() - score
+            return score
         else:
-            re_score = re_head * re_relation - im_head * im_relation
-            im_score = re_head * im_relation + im_head * re_relation
-            re_score = re_score - re_tail
-            im_score = im_score - im_tail
 
-        score = torch.stack([re_score, im_score], dim = 0)
-        score = score.norm(dim = 0)
+        
+            re_head, im_head = torch.chunk(head, 2, dim=2)
+            re_tail, im_tail = torch.chunk(tail, 2, dim=2)
+            phase_relation = relation/(self.embedding_range.item()/pi)
 
-        score = self.gamma.item() - score.sum(dim = 2)
-        return score
+            #Make phases of relations uniformly distributed in [-pi, pi]
+
+
+            re_relation = torch.cos(phase_relation)
+            im_relation = torch.sin(phase_relation)
+
+            if mode == 'head-batch':
+                re_score = re_relation * re_tail + im_relation * im_tail
+                im_score = re_relation * im_tail - im_relation * re_tail
+                re_score = re_score - re_head
+                im_score = im_score - im_head
+            else:
+                re_score = re_head * re_relation - im_head * im_relation
+                im_score = re_head * im_relation + im_head * re_relation
+                re_score = re_score - re_tail
+                im_score = im_score - im_tail
+
+            score = torch.stack([re_score, im_score], dim = 0)
+            score = score.norm(dim = 0)
+
+            score = self.gamma.item() - score.sum(dim = 2)
+            return score
 
     def pRotatE(self, head, relation, tail, mode):
         pi = 3.14159262358979323846

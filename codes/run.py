@@ -224,6 +224,7 @@ def main(args):
         nrelation=nrelation,
         hidden_dim=args.hidden_dim,
         gamma=args.gamma,
+        vec_space='clifford',
         double_entity_embedding=args.double_entity_embedding,
         double_relation_embedding=args.double_relation_embedding
     )
@@ -257,6 +258,7 @@ def main(args):
         
         # Set training configuration
         current_learning_rate = args.learning_rate
+        print("kge_model.parameters()",kge_model.parameters())
         optimizer = torch.optim.Adam(
             filter(lambda p: p.requires_grad, kge_model.parameters()), 
             lr=current_learning_rate
@@ -330,10 +332,10 @@ def main(args):
                 log_metrics('Training average', step, metrics)
                 training_logs = []
                 
-            if args.do_valid and step % args.valid_steps == 0:
-                logging.info('Evaluating on Valid Dataset...')
-                metrics = kge_model.test_step(kge_model, valid_triples, all_true_triples, args)
-                log_metrics('Valid', step, metrics)
+            # if args.do_valid and step % args.valid_steps == 0:
+            #     logging.info('Evaluating on Valid Dataset...')
+            #     metrics = kge_model.test_step(kge_model, valid_triples, all_true_triples, args)
+            #     log_metrics('Valid', step, metrics)
         
         save_variable_list = {
             'step': step, 
