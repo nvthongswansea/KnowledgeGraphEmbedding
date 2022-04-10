@@ -75,7 +75,8 @@ class KGEModel(nn.Module):
         if model_name == 'ComplEx' and (not double_entity_embedding or not double_relation_embedding):
             raise ValueError('ComplEx should use --double_entity_embedding and --double_relation_embedding')
         
-    def forward(self, sample, mode='single'):
+    def forward(self, sample, mode='single', debug_msg=''):
+        # print('*******************DEBUG MESSAGE', debug_msg)
         '''
         Forward function that calculate the score of a batch of triples.
         In the 'single' mode, sample is a batch of triple.
@@ -253,8 +254,7 @@ class KGEModel(nn.Module):
                     r_head = [w_i*head_i_cl_j for (w_i,head_i_cl_j) in zip(w, head_i_cl)]
                     r_head = [r_head_i*w_hat_i for (r_head_i,w_hat_i) in zip(r_head, w_hat)]
                     score_cl = [r_head_i-tail_cl_i for (r_head_i,tail_cl_i) in zip(r_head, tail_cl)]
-                    score = [score_cl_i[1]+score_cl_i[2]+score_cl_i[3] for score_cl_i in score_cl]
-                    # print('len score_cl', len(score_cl))
+                    score = [(score_cl_i[1]+score_cl_i[2]+score_cl_i[3])/3 for score_cl_i in score_cl]
             elif mode == 'tail-batch':
                 head_cl = [GA.tensor_to_mv(head_i) for head_i in head]
                 r_head = [w_i*head_cl_i for (w_i,head_cl_i) in zip(w, head_cl)]
@@ -267,13 +267,14 @@ class KGEModel(nn.Module):
                         score_stack += torch.stack((score_tensor[1], score_tensor[2], score_tensor[3]))
                     # print('score_stack',score_stack)
                     score.append(score_stack)
+                    # print('score', score)
             else:
                 head_cl = [GA.tensor_to_mv(head_i) for head_i in head]
                 r_head = [w_i*head_cl_i for (w_i,head_cl_i) in zip(w, head_cl)]
                 r_head = [head_cl_i*w_hat_i for (head_cl_i,w_hat_i) in zip(r_head, w_hat)]
                 tail_cl = [GA.tensor_to_mv(tail_i) for tail_i in tail]
                 score_cl = [head_cl_i-tail_cl_i for (head_cl_i,tail_cl_i) in zip(r_head, tail_cl)]
-                score = [score_cl_i[1]+score_cl_i[2]+score_cl_i[3] for score_cl_i in score_cl]
+                score = [(score_cl_i[1]+score_cl_i[2]+score_cl_i[3])/3 for score_cl_i in score_cl]
                 # score_s = torch.stack(score_tensor)
                 # score = GA.mv_to_tensor(score_cl)
                 # print('cc', head)
@@ -354,7 +355,7 @@ class KGEModel(nn.Module):
             negative_sample = negative_sample.cuda()
             subsampling_weight = subsampling_weight.cuda()
 
-        negative_score = model((positive_sample, negative_sample), mode=mode)
+        negative_score = model((positive_sample, negative_sample), mode=mode,debug_msg='negative_score calculation')
 
         if args.negative_adversarial_sampling:
             #In self-adversarial sampling, we do not apply back-propagation on the sampling weight
@@ -363,7 +364,7 @@ class KGEModel(nn.Module):
         else:
             negative_score = F.logsigmoid(-negative_score).mean(dim = 1)
 
-        positive_score = model(positive_sample)
+        positive_score = model(positive_sample,debug_msg='positive_score calculation')
 
         positive_score = F.logsigmoid(positive_score).squeeze(dim = 1)
 
