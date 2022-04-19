@@ -237,7 +237,7 @@ class KGEModel(nn.Module):
         score = score.sum(dim = 2)
         return score
 
-    def RotatE(self, head, relation, tail, mode):
+    def RotatE(self, head, relation, tail, mode, isEvaluateStep=False):
         pi = 3.14159265358979323846
         re_head, im_head = torch.chunk(head, 2, dim=2)
         re_tail, im_tail = torch.chunk(tail, 2, dim=2)
@@ -308,14 +308,22 @@ class KGEModel(nn.Module):
                 head_cl = [GA.tensor_to_mv(head_i) for head_i in head]
                 r_head = [w_i*head_cl_i for (w_i,head_cl_i) in zip(w, head_cl)]
                 r_head = [head_cl_i*w_hat_i for (head_cl_i,w_hat_i) in zip(r_head, w_hat)]
-                print("---------------------------------------------------------------------------------------------------------------------")
-                print("r_head", r_head)
-                print("---------------------------------------------------------------------------------------------------------------------")
-                for (r_head_i, w_i, w_hat_i , tail_i) in zip(r_head, w, w_hat, tail):
-                    tail_i_cl = [GA.tensor_to_mv(tail_j) for tail_j in tail_i]
-                    print("---------------------------------------------------------------------------------------------------------------------")
-                    print("tail_i_cl", tail_i_cl, len(tail_i_cl))
-                    print("---------------------------------------------------------------------------------------------------------------------")
+                # print("---------------------------------------------------------------------------------------------------------------------")
+                # print("r_head", r_head)
+                # print("---------------------------------------------------------------------------------------------------------------------")
+                for (r_head_i, tail_i) in zip(r_head, tail):
+                    # tail_i_cl = [GA.tensor_to_mv(tail_j) for tail_j in tail_i]
+                    score_i_tensor = []
+                    for tail_ij in tail_i:
+                        score_cl = r_head_i - GA.tensor_to_mv(tail_ij)
+                        score_tensor = GA.mv_to_tensor(score_cl)
+                        score_i_tensor.append((score_tensor[1] + score_tensor[2] + score_tensor[3]) / 3)
+                    score_i_tensor = torch.vstack(score_i_tensor)
+                    score.append(torch.squeeze(score_i_tensor))
+                    # print("---------------------------------------------------------------------------------------------------------------------")
+                    # print("score_i_tensor", score_i_tensor, score_i_tensor.shape)
+                    # print("---------------------------------------------------------------------------------------------------------------------")
+                # print('score ^^^^^^^^^^^', mode, score)
                     
             # print("score", score)
             # if len(score) == 0:
@@ -346,10 +354,10 @@ class KGEModel(nn.Module):
             head_cl = [GA.tensor_to_mv(head_i) for head_i in head]
             r_head = [w_i*head_cl_i for (w_i,head_cl_i) in zip(w, head_cl)]
             r_head = [head_cl_i*w_hat_i for (head_cl_i,w_hat_i) in zip(r_head, w_hat)]
-            for (head_cl_i,tail_i) in zip(r_head, tail):
+            for (r_head_i,tail_i) in zip(r_head, tail):
                 score_stack = torch.tensor([0.])
-                for j in range(len(tail_i)):
-                    score_cl = head_cl_i - GA.tensor_to_mv(tail_i[j])
+                for tail_ij in tail_i:
+                    score_cl = r_head_i - GA.tensor_to_mv(tail_ij)
                     score_tensor = GA.mv_to_tensor(score_cl)
                     score_stack += (score_tensor[1] + score_tensor[2] + score_tensor[3]) / 3
                 score_stack = score_stack / len(tail_i)
