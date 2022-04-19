@@ -21,7 +21,7 @@ from ga import GA
 
 
 class KGEModel(nn.Module):
-    def __init__(self, model_name, nentity, nrelation, hidden_dim, gamma, vec_space,
+    def __init__(self, model_name, nentity, nrelation, hidden_dim, gamma,
                  double_entity_embedding=False, double_relation_embedding=False):
         super(KGEModel, self).__init__()
         # q = GA.tensor_to_mv(torch.tensor([[4, 3, 2, 1],[1,2,3,4]]))
@@ -32,7 +32,6 @@ class KGEModel(nn.Module):
         self.nrelation = nrelation
         self.hidden_dim = hidden_dim
         self.epsilon = 2.0
-        self.vec_space = vec_space
         
         self.gamma = nn.Parameter(
             torch.Tensor([gamma]), 
@@ -46,7 +45,7 @@ class KGEModel(nn.Module):
             
         self.entity_dim = hidden_dim*2 if double_entity_embedding else hidden_dim
         self.relation_dim = hidden_dim*2 if double_relation_embedding else hidden_dim
-        if vec_space == 'clifford':
+        if model_name == 'cliffordRotatE':
             self.entity_dim = 4
             self.relation_dim = 1
         self.entity_embedding = nn.Parameter(torch.zeros(nentity, self.entity_dim))
@@ -66,7 +65,7 @@ class KGEModel(nn.Module):
             self.modulus = nn.Parameter(torch.Tensor([[0.5 * self.embedding_range.item()]]))
         
         #Do not forget to modify this line when you add a new model in the "forward" function
-        if model_name not in ['TransE', 'DistMult', 'ComplEx', 'RotatE', 'pRotatE']:
+        if model_name not in ['TransE', 'DistMult', 'ComplEx', 'RotatE', 'pRotatE', 'cliffordRotatE']:
             raise ValueError('model %s not supported' % model_name)
             
         if model_name == 'RotatE' and (not double_entity_embedding or double_relation_embedding):
@@ -75,7 +74,7 @@ class KGEModel(nn.Module):
         if model_name == 'ComplEx' and (not double_entity_embedding or not double_relation_embedding):
             raise ValueError('ComplEx should use --double_entity_embedding and --double_relation_embedding')
         
-    def forward(self, sample, mode='single', debug_msg=''):
+    def forward(self, sample, mode='single', debug_msg='', isEvaluateStep=False):
         # print('*******************DEBUG MESSAGE', debug_msg)
         '''
         Forward function that calculate the score of a batch of triples.
@@ -90,7 +89,7 @@ class KGEModel(nn.Module):
         if mode == 'single':
             # print('----------------single----------------')
             batch_size, negative_sample_size = sample.size(0), 1
-            if self.vec_space == 'clifford':
+            if self.model_name == 'cliffordRotatE':
                 head = [self.entity_embedding[i] for i in sample[:,0]]
                 relation = [self.relation_embedding[i] for i in sample[:,1]]
                 tail = [self.entity_embedding[i] for i in sample[:,2]]
@@ -121,7 +120,7 @@ class KGEModel(nn.Module):
             # print('pos', tail_part)
             # print('neg', head_part)
             # exit(0)
-            if self.vec_space == 'clifford':
+            if self.model_name == 'cliffordRotatE':
                 head = []
                 relation = [self.relation_embedding[i] for i in tail_part[:,1]]
                 tail = [self.entity_embedding[i] for i in tail_part[:,2]]
@@ -153,7 +152,7 @@ class KGEModel(nn.Module):
             # print('tail-batch')
             # print('pos', head_part)
             # print('neg', tail_part)
-            if self.vec_space == 'clifford':
+            if self.model_name == 'cliffordRotatE':
                 head = [self.entity_embedding[i] for i in head_part[:,0]]
                 relation = [self.relation_embedding[i] for i in head_part[:,1]]
                 tail = []
@@ -192,11 +191,12 @@ class KGEModel(nn.Module):
             'DistMult': self.DistMult,
             'ComplEx': self.ComplEx,
             'RotatE': self.RotatE,
-            'pRotatE': self.pRotatE
+            'pRotatE': self.pRotatE,
+            'cliffordRotatE': self.cliffordRotatE
         }
         
         if self.model_name in model_func:
-            score = model_func[self.model_name](head, relation, tail, mode)
+            score = model_func[self.model_name](head, relation, tail, mode, isEvaluateStep)
         else:
             raise ValueError('model %s not supported' % self.model_name)
         
@@ -239,84 +239,142 @@ class KGEModel(nn.Module):
 
     def RotatE(self, head, relation, tail, mode):
         pi = 3.14159265358979323846
+        re_head, im_head = torch.chunk(head, 2, dim=2)
+        re_tail, im_tail = torch.chunk(tail, 2, dim=2)
+        phase_relation = relation/(self.embedding_range.item()/pi)
 
-        if self.vec_space == 'clifford':
-            score = []
-            phase_relation = [rela_i/(self.embedding_range.item()/pi) for rela_i in relation]
-            w = [GA.tensor_to_mv(torch.tensor([np.cos(phase_i.item()), 0, 0, -np.sin(phase_i.item())])) for phase_i in phase_relation]
-            w_hat = [GA.tensor_to_mv(torch.tensor([np.cos(phase_i.item()), 0, 0, np.sin(phase_i.item())])) for phase_i in phase_relation]
-            # print('----r_head ccccc', [GA.mv_to_tensor(tail_i) for tail_i in w])
+        #Make phases of relations uniformly distributed in [-pi, pi]
+
+
+        re_relation = torch.cos(phase_relation)
+        im_relation = torch.sin(phase_relation)
+
+        if mode == 'head-batch':
+            re_score = re_relation * re_tail + im_relation * im_tail
+            im_score = re_relation * im_tail - im_relation * re_tail
+            re_score = re_score - re_head
+            im_score = im_score - im_head
+        else:
+            re_score = re_head * re_relation - im_head * im_relation
+            im_score = re_head * im_relation + im_head * re_relation
+            re_score = re_score - re_tail
+            im_score = im_score - im_tail
+
+        score = torch.stack([re_score, im_score], dim = 0)
+        score = score.norm(dim = 0)
+
+        score = self.gamma.item() - score.sum(dim = 2)
+        return score
+
+    def cliffordRotatE(self, head, relation, tail, mode, isEvaluateStep=False):
+                
+        pi = 3.14159265358979323846
+        score = []
+        phase_relation = [rela_i/(self.embedding_range.item()/pi) for rela_i in relation]
+        w = [GA.tensor_to_mv(torch.tensor([np.cos(phase_i.item()), 0, 0, -np.sin(phase_i.item())])) for phase_i in phase_relation]
+        w_hat = [GA.tensor_to_mv(torch.tensor([np.cos(phase_i.item()), 0, 0, np.sin(phase_i.item())])) for phase_i in phase_relation]
+        if isEvaluateStep:
+            # print("---------------------------------------------------------------------------------------------------------------------")
+            # print("HEAD", head)
+            # print("---------------------------------------------------------------------------------------------------------------------")
+            # print("RELATION", relation)
+            # print("---------------------------------------------------------------------------------------------------------------------")
+            # print("TAIL", tail)
+            # print("---------------------------------------------------------------------------------------------------------------------")
             if mode == 'head-batch':
                 tail_cl = [GA.tensor_to_mv(tail_i) for tail_i in tail]
-                # print('len head', len(head))
-                for (head_i, tail_cl_i) in zip(head, tail_cl):
+                for (head_i, w_i, w_hat_i , tail_cl_i) in zip(head, w, w_hat, tail_cl):
                     head_i_cl = [GA.tensor_to_mv(head_j) for head_j in head_i]
-                    r_head = [w_i*head_i_cl_j for (w_i,head_i_cl_j) in zip(w, head_i_cl)]
-                    r_head = [r_head_i*w_hat_i for (r_head_i,w_hat_i) in zip(r_head, w_hat)]
-                    score_cl = [r_head_i-tail_cl_i for (r_head_i,tail_cl_i) in zip(r_head, tail_cl)]
-                    score = [(score_cl_i[1]+score_cl_i[2]+score_cl_i[3])/3 for score_cl_i in score_cl]
-            elif mode == 'tail-batch':
+                    r_head = [w_i*head_i_cl_j for head_i_cl_j in head_i_cl]
+                    r_head = [r_head_i*w_hat_i for r_head_i in r_head]
+                    score_cl = [r_head_i-tail_cl_i for r_head_i in r_head]
+                    score_i_tensor = []
+                    for score_cl_i in score_cl:
+                        score_cli_i_tensor = GA.mv_to_tensor(score_cl_i)
+                        score_i_tensor.append((score_cli_i_tensor[1] + score_cli_i_tensor[2] + score_cli_i_tensor[3]) / 3)
+                    score_i_tensor = torch.vstack(score_i_tensor)
+                    score.append(torch.squeeze(score_i_tensor))
+                    # print("---------------------------------------------------------------------------------------------------------------------")
+                    # print("score_i_tensor", torch.squeeze(score_i_tensor), score_i_tensor.shape)
+                    # print("---------------------------------------------------------------------------------------------------------------------")
+                    # print("w_i", w_i)
+                    # print("---------------------------------------------------------------------------------------------------------------------")
+                    # print("w_hat_i", w_hat_i)
+                    # print("---------------------------------------------------------------------------------------------------------------------")
+                    # print("tail_cl_i", tail_cl_i)
+                    # print("---------------------------------------------------------------------------------------------------------------------")
+                    # print('score HEAD *****', score, len(score))
+            if mode == 'tail-batch':
                 head_cl = [GA.tensor_to_mv(head_i) for head_i in head]
                 r_head = [w_i*head_cl_i for (w_i,head_cl_i) in zip(w, head_cl)]
                 r_head = [head_cl_i*w_hat_i for (head_cl_i,w_hat_i) in zip(r_head, w_hat)]
-                for (head_cl_i,tail_i) in zip(r_head, tail):
-                    score_stack = torch.tensor([0., 0., 0.])
-                    for j in range(len(tail_i)):
-                        score_cl = head_cl_i - GA.tensor_to_mv(tail_i[j])
-                        score_tensor = GA.mv_to_tensor(score_cl)
-                        score_stack += torch.stack((score_tensor[1], score_tensor[2], score_tensor[3]))
-                    # print('score_stack',score_stack)
-                    score.append(score_stack)
-                    # print('score', score)
-            else:
-                head_cl = [GA.tensor_to_mv(head_i) for head_i in head]
-                r_head = [w_i*head_cl_i for (w_i,head_cl_i) in zip(w, head_cl)]
-                r_head = [head_cl_i*w_hat_i for (head_cl_i,w_hat_i) in zip(r_head, w_hat)]
-                tail_cl = [GA.tensor_to_mv(tail_i) for tail_i in tail]
-                score_cl = [head_cl_i-tail_cl_i for (head_cl_i,tail_cl_i) in zip(r_head, tail_cl)]
-                score = [(score_cl_i[1]+score_cl_i[2]+score_cl_i[3])/3 for score_cl_i in score_cl]
-                # score_s = torch.stack(score_tensor)
-                # score = GA.mv_to_tensor(score_cl)
-                # print('cc', head)
-                # print('cc', w)
-                # print('cc', w_hat)
-                # print('score_stack', score_stack)
+                print("---------------------------------------------------------------------------------------------------------------------")
+                print("r_head", r_head)
+                print("---------------------------------------------------------------------------------------------------------------------")
+                for (r_head_i, w_i, w_hat_i , tail_i) in zip(r_head, w, w_hat, tail):
+                    tail_i_cl = [GA.tensor_to_mv(tail_j) for tail_j in tail_i]
+                    print("---------------------------------------------------------------------------------------------------------------------")
+                    print("tail_i_cl", tail_i_cl, len(tail_i_cl))
+                    print("---------------------------------------------------------------------------------------------------------------------")
+                    
+            # print("score", score)
+            # if len(score) == 0:
+            #     print("mode", mode)
             score = torch.vstack(score)
-            # print('score', score)
-            # score = score.sum(dim = 1)
-            # print('score', score)
-
+            # print('score ^^^^^^^^^^^', mode, score, score.shape)
+            # exit(0)
             score = self.gamma.item() - score
             return score
+
+        # print('----r_head ccccc', [GA.mv_to_tensor(tail_i) for tail_i in w])
+        if mode == 'head-batch':
+            tail_cl = [GA.tensor_to_mv(tail_i) for tail_i in tail]
+            # print('len head', len(head))
+            for (head_i, tail_cl_i) in zip(head, tail_cl):
+                head_i_cl = [GA.tensor_to_mv(head_j) for head_j in head_i]
+                r_head = [w_i*head_i_cl_j for (w_i,head_i_cl_j) in zip(w, head_i_cl)]
+                r_head = [r_head_i*w_hat_i for (r_head_i,w_hat_i) in zip(r_head, w_hat)]
+                score_cl = [r_head_i-tail_cl_i for (r_head_i,tail_cl_i) in zip(r_head, tail_cl)]
+                score_stack = torch.tensor([0.])
+                for score_cl_i in score_cl:
+                    score_cli_i_tensor = GA.mv_to_tensor(score_cl_i)
+                    score_stack += (score_cli_i_tensor[1] + score_cli_i_tensor[2] + score_cli_i_tensor[3]) / 3    
+                score_stack = score_stack / len(score_cl)
+                score.append(score_stack)
+            # print('score HEAD *****', score)
+        elif mode == 'tail-batch':
+            head_cl = [GA.tensor_to_mv(head_i) for head_i in head]
+            r_head = [w_i*head_cl_i for (w_i,head_cl_i) in zip(w, head_cl)]
+            r_head = [head_cl_i*w_hat_i for (head_cl_i,w_hat_i) in zip(r_head, w_hat)]
+            for (head_cl_i,tail_i) in zip(r_head, tail):
+                score_stack = torch.tensor([0.])
+                for j in range(len(tail_i)):
+                    score_cl = head_cl_i - GA.tensor_to_mv(tail_i[j])
+                    score_tensor = GA.mv_to_tensor(score_cl)
+                    score_stack += (score_tensor[1] + score_tensor[2] + score_tensor[3]) / 3
+                score_stack = score_stack / len(tail_i)
+                # print('score_stack',score_stack)
+                score.append(score_stack)
+            # print('score TAIL ------', score)
         else:
+            head_cl = [GA.tensor_to_mv(head_i) for head_i in head]
+            r_head = [w_i*head_cl_i for (w_i,head_cl_i) in zip(w, head_cl)]
+            r_head = [head_cl_i*w_hat_i for (head_cl_i,w_hat_i) in zip(r_head, w_hat)]
+            tail_cl = [GA.tensor_to_mv(tail_i) for tail_i in tail]
+            score_cl = [head_cl_i-tail_cl_i for (head_cl_i,tail_cl_i) in zip(r_head, tail_cl)]
+            score = [(score_cl_i[1]+score_cl_i[2]+score_cl_i[3])/3 for score_cl_i in score_cl]
+            # score_s = torch.stack(score_tensor)
+            # score = GA.mv_to_tensor(score_cl)
+            # print('cc', head)
+            # print('cc', w)
+            # print('cc', w_hat)
+            # print('score_stack', score_stack)
+        score = torch.vstack(score)
+        # score = score.sum(dim = 1)
+        # print('score ^^^^^^^^^^^', mode, score)
 
-        
-            re_head, im_head = torch.chunk(head, 2, dim=2)
-            re_tail, im_tail = torch.chunk(tail, 2, dim=2)
-            phase_relation = relation/(self.embedding_range.item()/pi)
-
-            #Make phases of relations uniformly distributed in [-pi, pi]
-
-
-            re_relation = torch.cos(phase_relation)
-            im_relation = torch.sin(phase_relation)
-
-            if mode == 'head-batch':
-                re_score = re_relation * re_tail + im_relation * im_tail
-                im_score = re_relation * im_tail - im_relation * re_tail
-                re_score = re_score - re_head
-                im_score = im_score - im_head
-            else:
-                re_score = re_head * re_relation - im_head * im_relation
-                im_score = re_head * im_relation + im_head * re_relation
-                re_score = re_score - re_tail
-                im_score = im_score - im_tail
-
-            score = torch.stack([re_score, im_score], dim = 0)
-            score = score.norm(dim = 0)
-
-            score = self.gamma.item() - score.sum(dim = 2)
-            return score
+        score = self.gamma.item() - score
+        return score
 
     def pRotatE(self, head, relation, tail, mode):
         pi = 3.14159262358979323846
@@ -408,7 +466,7 @@ class KGEModel(nn.Module):
         '''
         
         model.eval()
-        
+        print("is COUNTRIES used?", args.countries)
         if args.countries:
             #Countries S* datasets are evaluated on AUC-PR
             #Process test data for AUC-PR evaluation
@@ -479,7 +537,10 @@ class KGEModel(nn.Module):
 
                         batch_size = positive_sample.size(0)
 
-                        score = model((positive_sample, negative_sample), mode)
+                        score = model((positive_sample, negative_sample), mode, isEvaluateStep=True)
+                        # print("---------------------------------------------------------------------------------------------------------------------")
+                        # print("FILTER_BIAS", filter_bias)
+                        # print("---------------------------------------------------------------------------------------------------------------------")
                         score += filter_bias
 
                         #Explicitly sort all the entities to ensure that there is no test exposure bias
